@@ -1,8 +1,4 @@
-mod config;
-mod decoder;
-mod encoder;
-mod inference;
-mod mel;
+use qwen3_asr::inference;
 
 use anyhow::Result;
 use candle_core::Device;
