@@ -32,6 +32,11 @@ pub struct AsrInference {
     device: Device,
 }
 
+// SAFETY: AsrInference holds candle tensors which contain raw pointers, but
+// we only ever access them from one thread at a time (guarded by Mutex in the
+// caller), so crossing the thread boundary is safe.
+unsafe impl Send for AsrInference {}
+
 impl AsrInference {
     pub fn load(model_dir: &Path, device: Device) -> Result<Self> {
         eprintln!("Loading config...");
@@ -74,27 +79,35 @@ impl AsrInference {
         Ok(Self { audio_encoder, text_decoder, mel_extractor, tokenizer, config, device })
     }
 
+    /// Transcribe from a WAV file path.
     pub fn transcribe(&self, audio_path: &str, language: Option<&str>) -> Result<TranscribeResult> {
-        // Step 1: Load audio
         eprintln!("Loading audio: {}", audio_path);
         let samples = load_audio_wav(audio_path, MEL_SAMPLE_RATE)?;
         eprintln!("Audio: {} samples @ {}Hz", samples.len(), MEL_SAMPLE_RATE);
+        self.run_inference(&samples, language)
+    }
 
-        // Step 2: Mel spectrogram
-        let (mel_data, n_mels, n_frames) = self.mel_extractor.extract(&samples)?;
+    /// Transcribe directly from pre-loaded 16 kHz f32 samples.
+    pub fn transcribe_samples(&self, samples: &[f32], language: Option<&str>) -> Result<TranscribeResult> {
+        self.run_inference(samples, language)
+    }
+
+    fn run_inference(&self, samples: &[f32], language: Option<&str>) -> Result<TranscribeResult> {
+        // Step 1: Mel spectrogram
+        let (mel_data, n_mels, n_frames) = self.mel_extractor.extract(samples)?;
         eprintln!("Mel: {}×{} frames", n_mels, n_frames);
         let mel = Tensor::from_vec(mel_data, (n_mels, n_frames), &self.device)?;
 
-        // Step 3: Audio encoder
+        // Step 2: Audio encoder
         let audio_embeds = self.audio_encoder.forward(&mel)?;
         let num_audio_tokens = audio_embeds.dims()[0];
         eprintln!("Audio tokens: {}", num_audio_tokens);
 
-        // Step 4: Build prompt token IDs
+        // Step 3: Build prompt token IDs
         let (input_ids, audio_start_pos) = self.build_prompt(num_audio_tokens, language)?;
         let seq_len = input_ids.len();
 
-        // Step 5: Build embeddings, inject audio at the audio pad positions
+        // Step 4: Build embeddings, inject audio at the audio pad positions
         let before_ids: Vec<i64> = input_ids[..audio_start_pos].to_vec();
         let after_ids: Vec<i64> = input_ids[audio_start_pos + num_audio_tokens..].to_vec();
 
@@ -116,7 +129,7 @@ impl AsrInference {
             Tensor::cat(&[&before_emb, &audio_emb, &after_emb], 0)?.unsqueeze(0)?;
         // hidden_states: [1, seq_len, hidden]
 
-        // Step 6: MRoPE position IDs (all 3 sections use the same linear positions)
+        // Step 5: MRoPE position IDs (all 3 sections use the same linear positions)
         let positions: Vec<i64> = (0..seq_len as i64).collect();
         let position_ids: [Vec<i64>; 3] =
             [positions.clone(), positions.clone(), positions.clone()];
@@ -131,7 +144,7 @@ impl AsrInference {
             &self.device,
         )?;
 
-        // Step 7: Prefill
+        // Step 6: Prefill
         let mask = create_causal_mask(seq_len, 0, &self.device)?;
         let mut kv_cache = KvCache::new(text_cfg.num_hidden_layers);
 
@@ -143,7 +156,7 @@ impl AsrInference {
             Some(&mask),
         )?;
 
-        // Step 8: Autoregressive generation
+        // Step 7: Autoregressive generation
         let mut generated_ids: Vec<u32> = Vec::new();
         let max_new_tokens = 512;
         let eos_ids: &[i64] = &[ENDOFTEXT_TOKEN_ID, IM_END_TOKEN_ID];
@@ -218,7 +231,7 @@ impl AsrInference {
             current_pos += 1;
         }
 
-        // Step 9: Decode
+        // Step 8: Decode
         eprintln!("Generated {} tokens", generated_ids.len());
         let raw_text = self
             .tokenizer
