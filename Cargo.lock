@@ -1237,7 +1237,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qwen3-asr-test"
+name = "qwen3-asr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
