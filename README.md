@@ -78,6 +78,8 @@ Five audio samples are included in [`audio/`](audio/) — two short and three lo
 **Rust output (0.6B):**
 > 今天我们来讨论一下大语言模型的发展现状。Large language models like GPT and Claude have shown impressive results on a wide range of benchmarks demonstrating strong reasoning and language understanding capabilities. 未来，随着多模态技术的进步，这些模型将能够同时处理文字、图像和语音，实现更加自然和智能的人机交互。
 
+> ⚠️ Minor difference: comma after `benchmarks` is missing in Rust output.
+
 ---
 
 ## Architecture
