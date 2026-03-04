@@ -2,10 +2,10 @@
 name = "qwen3-asr"
 version = "0.2.0"
 edition = "2021"
-description = "Rust inference engine for Qwen3-ASR speech recognition models using candle"
+description = "Local speech-to-text (ASR) in Rust — Qwen3-ASR inference with Metal & CUDA GPU acceleration, batch and streaming transcription"
 license = "MIT"
 repository = "https://github.com/alan890104/qwen3-asr-rs"
-keywords = ["asr", "speech-recognition", "qwen3", "candle", "whisper"]
+keywords = ["speech-to-text", "asr", "speech-recognition", "transcription", "candle"]
 categories = ["multimedia::audio", "science"]
 readme = "README.md"
 include = ["src/**/*.rs", "README.md", "LICENSE"]
