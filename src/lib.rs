@@ -8,6 +8,7 @@ mod inference;
 mod linear;
 mod mel;
 mod streaming;
+mod tokenizer_build;
 
 pub use encoder::EncoderCache;
 pub use error::{AsrError, Result};

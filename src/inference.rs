@@ -110,7 +110,28 @@ impl AsrInference {
         maybe_convert_weights_for_cpu(&mut weights, &device);
 
         info!("Loading tokenizer...");
-        let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        if !tokenizer_path.exists() {
+            // Qwen3-ASR on HuggingFace doesn't ship tokenizer.json directly.
+            // Build it from vocab.json + merges.txt + tokenizer_config.json.
+            info!("tokenizer.json not found, building from vocab.json + merges.txt + tokenizer_config.json...");
+            let vocab = std::fs::read_to_string(model_dir.join("vocab.json"))
+                .context("read vocab.json (needed to build tokenizer.json)")
+                .map_err(AsrError::ModelLoad)?;
+            let merges = std::fs::read_to_string(model_dir.join("merges.txt"))
+                .context("read merges.txt (needed to build tokenizer.json)")
+                .map_err(AsrError::ModelLoad)?;
+            let tok_config = std::fs::read_to_string(model_dir.join("tokenizer_config.json"))
+                .context("read tokenizer_config.json (needed to build tokenizer.json)")
+                .map_err(AsrError::ModelLoad)?;
+            let tok_json = crate::tokenizer_build::build_qwen3_tokenizer_json(&vocab, &merges, &tok_config)
+                .context("build tokenizer.json")
+                .map_err(AsrError::ModelLoad)?;
+            std::fs::write(&tokenizer_path, &tok_json)
+                .context("write tokenizer.json")
+                .map_err(AsrError::ModelLoad)?;
+        }
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))
             .map_err(AsrError::ModelLoad)?;
 
