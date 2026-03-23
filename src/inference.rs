@@ -431,9 +431,7 @@ impl AsrInferenceInner {
             .decode(generated_ids, true)
             .map_err(|e| anyhow::anyhow!("decode: {}", e))?;
 
-        let (lang, text) = if language.is_some() {
-            ("forced".to_string(), raw_text.trim().to_string())
-        } else if let Some(sep_pos) =
+        let (lang, text) = if let Some(sep_pos) =
             generated_ids.iter().position(|&id| id == ASR_TEXT_SEP_TOKEN_ID)
         {
             let lang_ids: Vec<u32> = generated_ids[..sep_pos].to_vec();

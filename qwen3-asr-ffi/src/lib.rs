@@ -18,6 +18,7 @@ pub struct AsrSession {
     session_samples: usize,
     session_limit: usize,
     chunk_size_sec: f32,
+    language: Option<String>,
 }
 
 // ── Options struct (repr C) ─────────────────────────────────────────────
@@ -28,6 +29,10 @@ pub struct AsrSessionOptions {
     pub chunk_size_sec: c_float,
     /// Maximum session duration in seconds before auto-rotation (e.g. 10.0).
     pub session_duration_sec: c_float,
+    /// Force a specific language (e.g. "english", "french"). NULL for auto-detect.
+    pub language: *const c_char,
+    /// Vocabulary hint / prompt text. NULL for none.
+    pub prompt: *const c_char,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -229,10 +234,34 @@ pub extern "C" fn asr_session_create(
 ) -> *mut AsrSession {
     let engine_ref = unsafe { &*engine };
     let arc = engine_ref.inner.clone();
-    let streaming_opts = StreamingOptions::default()
+    let mut streaming_opts = StreamingOptions::default()
         .with_chunk_size_sec(opts.chunk_size_sec);
+    if !opts.language.is_null() {
+        if let Ok(lang) = unsafe { CStr::from_ptr(opts.language) }.to_str() {
+            if !lang.is_empty() {
+                streaming_opts = streaming_opts.with_language(lang);
+            }
+        }
+    }
+    if !opts.prompt.is_null() {
+        if let Ok(prompt) = unsafe { CStr::from_ptr(opts.prompt) }.to_str() {
+            if !prompt.is_empty() {
+                streaming_opts = streaming_opts.with_initial_text(prompt);
+            }
+        }
+    }
     let state = arc.init_streaming(streaming_opts);
     let session_limit = (opts.session_duration_sec as usize) * TARGET_SR;
+
+    let language = if !opts.language.is_null() {
+        unsafe { CStr::from_ptr(opts.language) }
+            .to_str()
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
 
     Box::into_raw(Box::new(AsrSession {
         engine: arc,
@@ -241,6 +270,7 @@ pub extern "C" fn asr_session_create(
         session_samples: 0,
         session_limit,
         chunk_size_sec: opts.chunk_size_sec,
+        language,
     }))
 }
 
@@ -366,9 +396,12 @@ fn rotate_session(s: &mut AsrSession) {
 
     // Start a new sub-session with context from the tail of the transcript.
     let context = tail_chars(&s.transcript, 200);
-    let opts = StreamingOptions::default()
+    let mut opts = StreamingOptions::default()
         .with_chunk_size_sec(s.chunk_size_sec)
         .with_initial_text(context);
+    if let Some(lang) = &s.language {
+        opts = opts.with_language(lang);
+    }
     s.state = s.engine.init_streaming(opts);
     s.session_samples = 0;
 }

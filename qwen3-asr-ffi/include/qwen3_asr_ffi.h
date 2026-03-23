@@ -15,6 +15,8 @@ typedef struct AsrSession AsrSession;
 typedef struct {
     float chunk_size_sec;        /* e.g. 0.5  */
     float session_duration_sec;  /* e.g. 10.0 — auto-rotates after this */
+    const char *language;        /* e.g. "english", "french", or NULL for auto-detect */
+    const char *prompt;          /* vocabulary hint text, or NULL for none */
 } AsrSessionOptions;
 
 /*
