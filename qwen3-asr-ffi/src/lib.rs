@@ -224,6 +224,41 @@ pub extern "C" fn asr_engine_free(engine: *mut AsrEngine) {
     }
 }
 
+/// Single-shot transcription from 16 kHz mono f32 samples.
+///
+/// Returns a newly-allocated C string with the transcript (free with `asr_string_free`).
+/// Returns NULL on error (check `*out_err`).
+#[no_mangle]
+pub extern "C" fn asr_engine_transcribe_samples(
+    engine: *const AsrEngine,
+    samples: *const c_float,
+    num_samples: usize,
+    out_err: *mut *mut c_char,
+) -> *mut c_char {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let engine_ref = unsafe { &*engine };
+        let audio = unsafe { std::slice::from_raw_parts(samples, num_samples) };
+        let opts = qwen3_asr::TranscribeOptions::default();
+        let result = engine_ref
+            .inner
+            .transcribe_samples(audio, opts)
+            .map_err(|e| format!("{e:#}"))?;
+        Ok::<_, String>(result.text)
+    }));
+
+    match result {
+        Ok(Ok(text)) => to_c_string(text),
+        Ok(Err(msg)) => {
+            set_error(out_err, msg);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            set_error(out_err, "panic during transcribe_samples".into());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ── Session API ─────────────────────────────────────────────────────────
 
 /// Create a streaming session. The caller must free it with `asr_session_free`.

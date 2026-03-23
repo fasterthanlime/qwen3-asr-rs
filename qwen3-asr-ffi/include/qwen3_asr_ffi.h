@@ -49,6 +49,16 @@ AsrEngine *asr_engine_from_gguf(const char *base_repo_id,
                                  const char *cache_dir,
                                  char **out_err);
 
+/*
+ * Single-shot transcription from 16 kHz mono float32 samples.
+ * Returns a freshly-allocated string (free with asr_string_free).
+ * Returns NULL on error (check *out_err).
+ */
+char *asr_engine_transcribe_samples(const AsrEngine *engine,
+                                     const float *samples,
+                                     size_t num_samples,
+                                     char **out_err);
+
 /* Free an engine handle. NULL-safe. */
 void asr_engine_free(AsrEngine *engine);
 
