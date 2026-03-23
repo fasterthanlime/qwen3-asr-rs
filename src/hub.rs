@@ -135,4 +135,71 @@ pub(crate) fn ensure_model_cached(model_id: &str, cache_dir: &Path) -> anyhow::R
     Ok(model_dir)
 }
 
+/// Ensure a GGUF model is cached. Downloads config + tokenizer from
+/// `base_repo_id` (e.g. "Qwen/Qwen3-ASR-1.7B") and the quantized weights
+/// from `gguf_repo_id` (e.g. "Alkd/qwen3-asr-gguf").
+///
+/// Cache layout: `{cache_dir}/{gguf_repo_id}--{gguf_filename}/`
+pub(crate) fn ensure_gguf_model_cached(
+    base_repo_id: &str,
+    gguf_repo_id: &str,
+    gguf_filename: &str,
+    cache_dir: &Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let sanitized = format!(
+        "{}--{}",
+        gguf_repo_id.replace('/', "--"),
+        gguf_filename.replace('.', "_")
+    );
+    let model_dir = cache_dir.join(&sanitized);
+    let marker = model_dir.join(".complete");
+
+    if marker.exists() {
+        info!("Using cached GGUF model at {}", model_dir.display());
+        return Ok(model_dir);
+    }
+
+    if model_dir.exists() {
+        info!("Removing incomplete GGUF download at {}", model_dir.display());
+        std::fs::remove_dir_all(&model_dir)?;
+    }
+
+    info!(
+        "Downloading GGUF model: {} from {}, config from {}",
+        gguf_filename, gguf_repo_id, base_repo_id
+    );
+    std::fs::create_dir_all(&model_dir)?;
+
+    // config.json from the base (non-quantized) repo
+    let config_bytes = hf_get_bytes(&hf_url(base_repo_id, "config.json"))
+        .context("download config.json from base repo")?;
+    std::fs::write(model_dir.join("config.json"), &config_bytes)?;
+
+    // GGUF weights from the quantized repo
+    hf_stream_to_file(
+        &hf_url(gguf_repo_id, gguf_filename),
+        &model_dir.join(gguf_filename),
+    )
+    .with_context(|| format!("download {gguf_filename}"))?;
+
+    // Tokenizer from the base repo
+    let tok_config = String::from_utf8(
+        hf_get_bytes(&hf_url(base_repo_id, "tokenizer_config.json"))
+            .context("download tokenizer_config.json")?,
+    )?;
+    let vocab = String::from_utf8(
+        hf_get_bytes(&hf_url(base_repo_id, "vocab.json")).context("download vocab.json")?,
+    )?;
+    let merges = String::from_utf8(
+        hf_get_bytes(&hf_url(base_repo_id, "merges.txt")).context("download merges.txt")?,
+    )?;
+    let tok_json = build_qwen3_tokenizer_json(&vocab, &merges, &tok_config)?;
+    std::fs::write(model_dir.join("tokenizer.json"), tok_json)?;
+
+    std::fs::write(&marker, b"")?;
+    info!("GGUF download complete, cached at {}", model_dir.display());
+
+    Ok(model_dir)
+}
+
 pub(crate) use crate::tokenizer_build::build_qwen3_tokenizer_json;

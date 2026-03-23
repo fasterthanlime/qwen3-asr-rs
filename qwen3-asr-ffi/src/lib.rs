@@ -143,6 +143,72 @@ pub extern "C" fn asr_engine_from_pretrained(
     }
 }
 
+/// Download a GGUF-quantized model from HuggingFace and load it.
+///
+/// `base_repo_id`: full-precision repo for config + tokenizer (e.g. "Qwen/Qwen3-ASR-1.7B")
+/// `gguf_repo_id`: repo hosting GGUF files (e.g. "Alkd/qwen3-asr-gguf")
+/// `gguf_filename`: specific GGUF file (e.g. "qwen3_asr_1.7b_q4_k.gguf")
+/// `cache_dir`: local directory for caching model files.
+///
+/// Returns NULL on error (check `*out_err`). Free with `asr_engine_free`.
+#[cfg(feature = "hub")]
+#[no_mangle]
+pub extern "C" fn asr_engine_from_gguf(
+    base_repo_id: *const c_char,
+    gguf_repo_id: *const c_char,
+    gguf_filename: *const c_char,
+    cache_dir: *const c_char,
+    out_err: *mut *mut c_char,
+) -> *mut AsrEngine {
+    let result = std::panic::catch_unwind(|| {
+        let base_id = unsafe { CStr::from_ptr(base_repo_id) }
+            .to_str()
+            .map_err(|e| format!("invalid base_repo_id: {e}"))?;
+        let gguf_id = unsafe { CStr::from_ptr(gguf_repo_id) }
+            .to_str()
+            .map_err(|e| format!("invalid gguf_repo_id: {e}"))?;
+        let filename = unsafe { CStr::from_ptr(gguf_filename) }
+            .to_str()
+            .map_err(|e| format!("invalid gguf_filename: {e}"))?;
+        let dir = unsafe { CStr::from_ptr(cache_dir) }
+            .to_str()
+            .map_err(|e| format!("invalid cache_dir: {e}"))?;
+        eprintln!(
+            "[qwen3-asr-ffi] from_gguf: base={base_id:?} gguf={gguf_id:?} file={filename:?} cache={dir:?}"
+        );
+        let device = qwen3_asr::best_device();
+        eprintln!("[qwen3-asr-ffi] device: {device:?}");
+        let inference = AsrInference::from_pretrained_gguf(
+            base_id,
+            gguf_id,
+            filename,
+            std::path::Path::new(dir),
+            device,
+        )
+        .map_err(|e| {
+            let msg = format!("{e:#}");
+            eprintln!("[qwen3-asr-ffi] from_gguf FAILED: {msg}");
+            msg
+        })?;
+        eprintln!("[qwen3-asr-ffi] GGUF model loaded successfully");
+        Ok::<_, String>(Box::into_raw(Box::new(AsrEngine {
+            inner: Arc::new(inference),
+        })))
+    });
+
+    match result {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(msg)) => {
+            set_error(out_err, msg);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            set_error(out_err, "panic during GGUF engine load".into());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Free an engine. Safe to call with NULL.
 #[no_mangle]
 pub extern "C" fn asr_engine_free(engine: *mut AsrEngine) {

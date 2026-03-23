@@ -33,6 +33,20 @@ AsrEngine *asr_engine_from_pretrained(const char *model_id,
                                       const char *cache_dir,
                                       char **out_err);
 
+/*
+ * Download a GGUF-quantized model from HuggingFace and load it.
+ * base_repo_id: full-precision repo for config+tokenizer (e.g. "Qwen/Qwen3-ASR-1.7B")
+ * gguf_repo_id: repo hosting GGUF files (e.g. "Alkd/qwen3-asr-gguf")
+ * gguf_filename: specific file (e.g. "qwen3_asr_1.7b_q4_k.gguf")
+ * cache_dir: local directory for caching model files.
+ * Returns NULL on error (check *out_err). Free with asr_engine_free.
+ */
+AsrEngine *asr_engine_from_gguf(const char *base_repo_id,
+                                 const char *gguf_repo_id,
+                                 const char *gguf_filename,
+                                 const char *cache_dir,
+                                 char **out_err);
+
 /* Free an engine handle. NULL-safe. */
 void asr_engine_free(AsrEngine *engine);
 

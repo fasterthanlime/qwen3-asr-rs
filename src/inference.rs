@@ -175,6 +175,30 @@ impl AsrInference {
         Self::load(&model_dir, device)
     }
 
+    /// Download a GGUF-quantized model and load it.
+    ///
+    /// Config and tokenizer are downloaded from `base_repo_id` (the original
+    /// full-precision repo), while the quantized weights come from `gguf_repo_id`.
+    ///
+    /// Requires the `hub` feature flag.
+    #[cfg(feature = "hub")]
+    pub fn from_pretrained_gguf(
+        base_repo_id: &str,
+        gguf_repo_id: &str,
+        gguf_filename: &str,
+        cache_dir: &Path,
+        device: Device,
+    ) -> crate::Result<Self> {
+        let model_dir = crate::hub::ensure_gguf_model_cached(
+            base_repo_id,
+            gguf_repo_id,
+            gguf_filename,
+            cache_dir,
+        )
+        .map_err(AsrError::ModelLoad)?;
+        Self::load(&model_dir, device)
+    }
+
     fn build_engine(
         config: AsrConfig,
         weights: &Weights,
