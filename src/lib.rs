@@ -9,6 +9,7 @@ mod linear;
 mod mel;
 mod streaming;
 mod tokenizer_build;
+mod weights;
 
 pub use encoder::EncoderCache;
 pub use error::{AsrError, Result};

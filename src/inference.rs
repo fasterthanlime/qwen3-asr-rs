@@ -10,6 +10,7 @@ use crate::decoder::{compute_mrope_cos_sin, create_causal_mask, KvCache, TextDec
 use crate::encoder::AudioEncoder;
 use crate::error::AsrError;
 use crate::mel::{load_audio_wav, MelExtractor};
+use crate::weights::{GgufWeights, Weights};
 
 // Special token IDs
 pub(crate) const IM_END_TOKEN_ID: i64 = 151645;
@@ -102,12 +103,21 @@ impl AsrInference {
             .map_err(AsrError::ModelLoad)?;
 
         info!("Loading weights (this may take a moment)...");
-        let mut weights = load_weights(model_dir, &device)
-            .context("load weights")
-            .map_err(AsrError::ModelLoad)?;
-        info!("Loaded {} weight tensors", weights.len());
+        let mut weights = if let Some(gguf_path) = find_gguf_file(model_dir) {
+            info!("Found GGUF file: {}", gguf_path.display());
+            let gguf = GgufWeights::load(&gguf_path, &device)
+                .context("load GGUF weights")
+                .map_err(AsrError::ModelLoad)?;
+            Weights::Quantized(gguf)
+        } else {
+            let w = load_safetensors_weights(model_dir, &device)
+                .context("load safetensors weights")
+                .map_err(AsrError::ModelLoad)?;
+            info!("Loaded {} weight tensors", match &w { Weights::Dense(m) => m.len(), _ => 0 });
+            w
+        };
 
-        maybe_convert_weights_for_cpu(&mut weights, &device);
+        weights.maybe_convert_for_cpu(&device);
 
         info!("Loading tokenizer...");
         let tokenizer_path = model_dir.join("tokenizer.json");
@@ -136,7 +146,7 @@ impl AsrInference {
             .map_err(AsrError::ModelLoad)?;
 
         info!("Model loaded successfully.");
-        Self::build_engine(config, weights, tokenizer, device).map_err(AsrError::ModelLoad)
+        Self::build_engine(config, &weights, tokenizer, device).map_err(AsrError::ModelLoad)
     }
 
     /// Download a model from HuggingFace Hub (if not already cached) and load it.
@@ -167,13 +177,13 @@ impl AsrInference {
 
     fn build_engine(
         config: AsrConfig,
-        weights: HashMap<String, Tensor>,
+        weights: &Weights,
         tokenizer: tokenizers::Tokenizer,
         device: Device,
     ) -> anyhow::Result<Self> {
         info!("Loading audio encoder...");
         let audio_encoder = AudioEncoder::load(
-            &weights,
+            weights,
             "thinker.audio_tower",
             &config.thinker_config.audio_config,
             &device,
@@ -182,7 +192,7 @@ impl AsrInference {
 
         info!("Loading text decoder...");
         let text_decoder = TextDecoder::load(
-            &weights,
+            weights,
             "thinker.model",
             &config.thinker_config.text_config,
         )
@@ -533,38 +543,22 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// Convert BF16/F16 weight tensors to F32 when running on CPU.
-///
-/// candle's CPU backend does not support BF16/F16 matmul. Metal and CUDA
-/// handle these natively, so this conversion only triggers on CPU.
-fn maybe_convert_weights_for_cpu(weights: &mut HashMap<String, Tensor>, device: &Device) {
-    if !device.is_cpu() {
-        return;
-    }
-    let mut converted = 0usize;
-    for (name, tensor) in weights.iter_mut() {
-        match tensor.dtype() {
-            DType::BF16 | DType::F16 => match tensor.to_dtype(DType::F32) {
-                Ok(t) => {
-                    *tensor = t;
-                    converted += 1;
-                }
-                Err(e) => {
-                    log::warn!("Failed to convert {name} to F32: {e}");
-                }
-            },
-            _ => {}
+/// Find the first `.gguf` file in a model directory.
+fn find_gguf_file(model_dir: &Path) -> Option<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(model_dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "gguf") {
+            return Some(path);
         }
     }
-    if converted > 0 {
-        info!(
-            "Converted {converted} weight tensors from BF16/F16 to F32 for CPU inference"
-        );
-    }
+    None
 }
 
 /// Load safetensors weights from a directory (single file or sharded).
-fn load_weights(model_dir: &Path, device: &Device) -> anyhow::Result<HashMap<String, Tensor>> {
+fn load_safetensors_weights(model_dir: &Path, device: &Device) -> anyhow::Result<Weights> {
     // Check for sharded model
     let index_path = model_dir.join("model.safetensors.index.json");
     if index_path.exists() {
@@ -588,12 +582,13 @@ fn load_weights(model_dir: &Path, device: &Device) -> anyhow::Result<HashMap<Str
             let w = candle_core::safetensors::load(&shard_path, device)?;
             all_weights.extend(w);
         }
-        return Ok(all_weights);
+        return Ok(Weights::Dense(all_weights));
     }
 
     // Single file
     let model_path = model_dir.join("model.safetensors");
-    candle_core::safetensors::load(&model_path, device).map_err(Into::into)
+    let w = candle_core::safetensors::load(&model_path, device)?;
+    Ok(Weights::Dense(w))
 }
 
 #[cfg(test)]
@@ -604,27 +599,30 @@ mod tests {
     fn test_convert_bf16_to_f32_on_cpu() {
         let device = Device::Cpu;
         let t = Tensor::zeros((2, 3), DType::BF16, &device).unwrap();
-        let mut weights = HashMap::from([("w".to_string(), t)]);
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        assert_eq!(weights["w"].dtype(), DType::F32);
+        let map = HashMap::from([("w".to_string(), t)]);
+        let mut weights = Weights::Dense(map);
+        weights.maybe_convert_for_cpu(&device);
+        assert_eq!(weights.get_tensor("w").unwrap().dtype(), DType::F32);
     }
 
     #[test]
     fn test_convert_f16_to_f32_on_cpu() {
         let device = Device::Cpu;
         let t = Tensor::zeros((2, 3), DType::F16, &device).unwrap();
-        let mut weights = HashMap::from([("w".to_string(), t)]);
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        assert_eq!(weights["w"].dtype(), DType::F32);
+        let map = HashMap::from([("w".to_string(), t)]);
+        let mut weights = Weights::Dense(map);
+        weights.maybe_convert_for_cpu(&device);
+        assert_eq!(weights.get_tensor("w").unwrap().dtype(), DType::F32);
     }
 
     #[test]
     fn test_convert_preserves_f32() {
         let device = Device::Cpu;
         let t = Tensor::zeros((2, 3), DType::F32, &device).unwrap();
-        let mut weights = HashMap::from([("w".to_string(), t)]);
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        assert_eq!(weights["w"].dtype(), DType::F32);
+        let map = HashMap::from([("w".to_string(), t)]);
+        let mut weights = Weights::Dense(map);
+        weights.maybe_convert_for_cpu(&device);
+        assert_eq!(weights.get_tensor("w").unwrap().dtype(), DType::F32);
     }
 
     #[test]
@@ -633,15 +631,16 @@ mod tests {
         let bf16 = Tensor::zeros((2, 2), DType::BF16, &device).unwrap();
         let f32_ = Tensor::zeros((2, 2), DType::F32, &device).unwrap();
         let f16 = Tensor::zeros((2, 2), DType::F16, &device).unwrap();
-        let mut weights = HashMap::from([
+        let map = HashMap::from([
             ("a".to_string(), bf16),
             ("b".to_string(), f32_),
             ("c".to_string(), f16),
         ]);
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        assert_eq!(weights["a"].dtype(), DType::F32);
-        assert_eq!(weights["b"].dtype(), DType::F32);
-        assert_eq!(weights["c"].dtype(), DType::F32);
+        let mut weights = Weights::Dense(map);
+        weights.maybe_convert_for_cpu(&device);
+        assert_eq!(weights.get_tensor("a").unwrap().dtype(), DType::F32);
+        assert_eq!(weights.get_tensor("b").unwrap().dtype(), DType::F32);
+        assert_eq!(weights.get_tensor("c").unwrap().dtype(), DType::F32);
     }
 
     #[test]
@@ -652,17 +651,17 @@ mod tests {
             .unwrap()
             .to_dtype(DType::BF16)
             .unwrap();
-        let mut weights = HashMap::from([("w".to_string(), t)]);
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        let result = weights["w"].to_vec2::<f32>().unwrap();
+        let map = HashMap::from([("w".to_string(), t)]);
+        let mut weights = Weights::Dense(map);
+        weights.maybe_convert_for_cpu(&device);
+        let result = weights.get_tensor("w").unwrap().to_vec2::<f32>().unwrap();
         assert_eq!(result, vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
     }
 
     #[test]
     fn test_convert_empty_map() {
         let device = Device::Cpu;
-        let mut weights = HashMap::new();
-        maybe_convert_weights_for_cpu(&mut weights, &device);
-        assert!(weights.is_empty());
+        let mut weights = Weights::Dense(HashMap::new());
+        weights.maybe_convert_for_cpu(&device);
     }
 }

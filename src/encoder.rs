@@ -1,48 +1,11 @@
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, Module};
+use candle_nn::{Conv2d, LayerNorm, Module};
 use candle_nn::ops::softmax_last_dim;
-use std::collections::HashMap;
 
 use crate::config::AudioEncoderConfig;
 use crate::linear::LinearW;
-
-// ─── Weight helpers (dense / safetensors path) ────────────────────────────────
-
-fn get_w(weights: &HashMap<String, Tensor>, name: &str) -> anyhow::Result<Tensor> {
-    weights
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("weight not found: {}", name))
-}
-
-fn load_linear(weights: &HashMap<String, Tensor>, prefix: &str) -> Result<LinearW> {
-    Ok(LinearW::new(
-        get_w(weights, &format!("{}.weight", prefix))?,
-        weights.get(&format!("{}.bias", prefix)).cloned(),
-    ))
-}
-
-fn load_layer_norm(weights: &HashMap<String, Tensor>, prefix: &str, eps: f64) -> Result<LayerNorm> {
-    Ok(LayerNorm::new(
-        get_w(weights, &format!("{}.weight", prefix))?,
-        get_w(weights, &format!("{}.bias", prefix))?,
-        eps,
-    ))
-}
-
-fn load_conv2d(
-    weights: &HashMap<String, Tensor>,
-    prefix: &str,
-    stride: usize,
-    padding: usize,
-) -> Result<Conv2d> {
-    Ok(Conv2d::new(
-        get_w(weights, &format!("{}.weight", prefix))?,
-        weights.get(&format!("{}.bias", prefix)).cloned(),
-        Conv2dConfig { stride, padding, ..Default::default() },
-    ))
-}
+use crate::weights::Weights;
 
 // ─── Audio Encoder Self-Attention ─────────────────────────────────────────────
 
@@ -57,17 +20,17 @@ struct AudioAttention {
 
 impl AudioAttention {
     fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         num_heads: usize,
         d_model: usize,
     ) -> Result<Self> {
         let head_dim = d_model / num_heads;
         Ok(Self {
-            q_proj:   load_linear(weights, &format!("{}.q_proj", prefix))?,
-            k_proj:   load_linear(weights, &format!("{}.k_proj", prefix))?,
-            v_proj:   load_linear(weights, &format!("{}.v_proj", prefix))?,
-            out_proj: load_linear(weights, &format!("{}.out_proj", prefix))?,
+            q_proj:   weights.load_linear(&format!("{}.q_proj", prefix))?,
+            k_proj:   weights.load_linear(&format!("{}.k_proj", prefix))?,
+            v_proj:   weights.load_linear(&format!("{}.v_proj", prefix))?,
+            out_proj: weights.load_linear(&format!("{}.out_proj", prefix))?,
             num_heads,
             head_dim,
         })
@@ -113,10 +76,10 @@ struct AudioFfn {
 }
 
 impl AudioFfn {
-    fn load(weights: &HashMap<String, Tensor>, prefix: &str) -> Result<Self> {
+    fn load(weights: &Weights, prefix: &str) -> Result<Self> {
         Ok(Self {
-            fc1: load_linear(weights, &format!("{}.fc1", prefix))?,
-            fc2: load_linear(weights, &format!("{}.fc2", prefix))?,
+            fc1: weights.load_linear(&format!("{}.fc1", prefix))?,
+            fc2: weights.load_linear(&format!("{}.fc2", prefix))?,
         })
     }
 
@@ -136,14 +99,13 @@ struct AudioEncoderLayer {
 
 impl AudioEncoderLayer {
     fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         num_heads: usize,
         d_model: usize,
     ) -> Result<Self> {
         Ok(Self {
-            self_attn_layer_norm: load_layer_norm(
-                weights,
+            self_attn_layer_norm: weights.load_layer_norm(
                 &format!("{}.self_attn_layer_norm", prefix),
                 1e-5,
             )?,
@@ -153,8 +115,7 @@ impl AudioEncoderLayer {
                 num_heads,
                 d_model,
             )?,
-            final_layer_norm: load_layer_norm(
-                weights,
+            final_layer_norm: weights.load_layer_norm(
                 &format!("{}.final_layer_norm", prefix),
                 1e-5,
             )?,
@@ -275,15 +236,15 @@ pub(crate) struct AudioEncoder {
 
 impl AudioEncoder {
     pub(crate) fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         config: &AudioEncoderConfig,
         device: &Device,
     ) -> Result<Self> {
-        let conv2d1 = load_conv2d(weights, &format!("{}.conv2d1", prefix), 2, 1)?;
-        let conv2d2 = load_conv2d(weights, &format!("{}.conv2d2", prefix), 2, 1)?;
-        let conv2d3 = load_conv2d(weights, &format!("{}.conv2d3", prefix), 2, 1)?;
-        let conv_out = load_linear(weights, &format!("{}.conv_out", prefix))?;
+        let conv2d1 = weights.load_conv2d(&format!("{}.conv2d1", prefix), 2, 1)?;
+        let conv2d2 = weights.load_conv2d(&format!("{}.conv2d2", prefix), 2, 1)?;
+        let conv2d3 = weights.load_conv2d(&format!("{}.conv2d3", prefix), 2, 1)?;
+        let conv_out = weights.load_linear(&format!("{}.conv_out", prefix))?;
 
         let mut layers = Vec::new();
         for i in 0..config.encoder_layers {
@@ -296,9 +257,9 @@ impl AudioEncoder {
             layers.push(layer);
         }
 
-        let ln_post = load_layer_norm(weights, &format!("{}.ln_post", prefix), 1e-5)?;
-        let proj1 = load_linear(weights, &format!("{}.proj1", prefix))?;
-        let proj2 = load_linear(weights, &format!("{}.proj2", prefix))?;
+        let ln_post = weights.load_layer_norm(&format!("{}.ln_post", prefix), 1e-5)?;
+        let proj1 = weights.load_linear(&format!("{}.proj1", prefix))?;
+        let proj2 = weights.load_linear(&format!("{}.proj2", prefix))?;
 
         let positional_embedding =
             create_sinusoidal_embedding(config.max_source_positions, config.d_model, device)?;

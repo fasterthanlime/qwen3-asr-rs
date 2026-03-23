@@ -2,27 +2,10 @@ use anyhow::Result;
 use candle_core::{Device, Tensor};
 use candle_nn::{Module, RmsNorm};
 use candle_nn::ops::softmax_last_dim;
-use std::collections::HashMap;
 
 use crate::config::TextDecoderConfig;
 use crate::linear::LinearW;
-
-// ─── Weight helpers (dense / safetensors path) ────────────────────────────────
-
-fn get_w(weights: &HashMap<String, Tensor>, name: &str) -> anyhow::Result<Tensor> {
-    weights
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("weight not found: {}", name))
-}
-
-fn load_linear(weights: &HashMap<String, Tensor>, prefix: &str) -> Result<LinearW> {
-    Ok(LinearW::new(get_w(weights, &format!("{}.weight", prefix))?, None))
-}
-
-fn load_rms_norm(weights: &HashMap<String, Tensor>, prefix: &str, eps: f64) -> Result<RmsNorm> {
-    Ok(RmsNorm::new(get_w(weights, &format!("{}.weight", prefix))?, eps))
-}
+use crate::weights::Weights;
 
 // ─── MRoPE ───────────────────────────────────────────────────────────────────
 
@@ -180,7 +163,7 @@ struct TextAttention {
 
 impl TextAttention {
     fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         num_q_heads: usize,
         num_kv_heads: usize,
@@ -188,12 +171,12 @@ impl TextAttention {
         rms_norm_eps: f64,
     ) -> Result<Self> {
         Ok(Self {
-            q_proj: load_linear(weights, &format!("{}.q_proj", prefix))?,
-            k_proj: load_linear(weights, &format!("{}.k_proj", prefix))?,
-            v_proj: load_linear(weights, &format!("{}.v_proj", prefix))?,
-            o_proj: load_linear(weights, &format!("{}.o_proj", prefix))?,
-            q_norm: load_rms_norm(weights, &format!("{}.q_norm", prefix), rms_norm_eps)?,
-            k_norm: load_rms_norm(weights, &format!("{}.k_norm", prefix), rms_norm_eps)?,
+            q_proj: weights.load_linear(&format!("{}.q_proj", prefix))?,
+            k_proj: weights.load_linear(&format!("{}.k_proj", prefix))?,
+            v_proj: weights.load_linear(&format!("{}.v_proj", prefix))?,
+            o_proj: weights.load_linear(&format!("{}.o_proj", prefix))?,
+            q_norm: weights.load_rms_norm(&format!("{}.q_norm", prefix), rms_norm_eps)?,
+            k_norm: weights.load_rms_norm(&format!("{}.k_norm", prefix), rms_norm_eps)?,
             num_q_heads,
             num_kv_heads,
             head_dim,
@@ -266,11 +249,11 @@ struct TextMlp {
 }
 
 impl TextMlp {
-    fn load(weights: &HashMap<String, Tensor>, prefix: &str) -> Result<Self> {
+    fn load(weights: &Weights, prefix: &str) -> Result<Self> {
         Ok(Self {
-            gate_proj: load_linear(weights, &format!("{}.gate_proj", prefix))?,
-            up_proj:   load_linear(weights, &format!("{}.up_proj", prefix))?,
-            down_proj: load_linear(weights, &format!("{}.down_proj", prefix))?,
+            gate_proj: weights.load_linear(&format!("{}.gate_proj", prefix))?,
+            up_proj:   weights.load_linear(&format!("{}.up_proj", prefix))?,
+            down_proj: weights.load_linear(&format!("{}.down_proj", prefix))?,
         })
     }
 
@@ -292,7 +275,7 @@ struct TextDecoderLayer {
 
 impl TextDecoderLayer {
     fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         num_q_heads: usize,
         num_kv_heads: usize,
@@ -300,8 +283,7 @@ impl TextDecoderLayer {
         rms_norm_eps: f64,
     ) -> Result<Self> {
         Ok(Self {
-            input_layernorm: load_rms_norm(
-                weights,
+            input_layernorm: weights.load_rms_norm(
                 &format!("{}.input_layernorm", prefix),
                 rms_norm_eps,
             )?,
@@ -313,8 +295,7 @@ impl TextDecoderLayer {
                 head_dim,
                 rms_norm_eps,
             )?,
-            post_attention_layernorm: load_rms_norm(
-                weights,
+            post_attention_layernorm: weights.load_rms_norm(
                 &format!("{}.post_attention_layernorm", prefix),
                 rms_norm_eps,
             )?,
@@ -370,12 +351,12 @@ pub(crate) struct TextDecoder {
 
 impl TextDecoder {
     pub(crate) fn load(
-        weights: &HashMap<String, Tensor>,
+        weights: &Weights,
         prefix: &str,
         config: &TextDecoderConfig,
     ) -> Result<Self> {
         let embed_tokens =
-            get_w(weights, &format!("{}.embed_tokens.weight", prefix))?;
+            weights.get_tensor(&format!("{}.embed_tokens.weight", prefix))?;
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
@@ -390,7 +371,7 @@ impl TextDecoder {
             layers.push(layer);
         }
 
-        let norm = load_rms_norm(weights, &format!("{}.norm", prefix), config.rms_norm_eps)?;
+        let norm = weights.load_rms_norm(&format!("{}.norm", prefix), config.rms_norm_eps)?;
         // Tie lm_head weights to embed_tokens (weight tying).
         let lm_head = LinearW::new(embed_tokens.clone(), None);
 
